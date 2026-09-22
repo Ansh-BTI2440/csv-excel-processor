@@ -29,6 +29,7 @@ jobs:
     env:
       SONAR_HOST_URL: http://localhost:9000
       SONAR_ADMIN_PASSWORD: TrainingAdmin123
+      
     steps:
       - name: Check out
         uses: actions/checkout@v4
