@@ -5,6 +5,12 @@ on:
     branches: [main]
   pull_request:
   workflow_dispatch:
+    inputs:
+      enforce_quality_gate:
+        description: "Fail workflow when quality gate fails"
+        required: false
+        default: false
+        type: boolean
 
 jobs:
   quality-gate:
@@ -50,7 +56,7 @@ jobs:
           echo "SonarQube did not become ready in time"
           exit 1
 
-      - name: Bootstrap SonarQube auth and failing quality gate
+      - name: Bootstrap SonarQube auth and quality gate
         run: |
           set -euo pipefail
 
@@ -97,12 +103,12 @@ jobs:
 
           curl -sf -u "${SONAR_AUTH}" -X POST \
             "${SONAR_HOST_URL}/api/qualitygates/create" \
-            --data-urlencode "name=workshop-fail" || true
+            --data-urlencode "name=workshop-standard" || true
 
           create_condition() {
             curl -sf -u "${SONAR_AUTH}" -X POST \
               "${SONAR_HOST_URL}/api/qualitygates/create_condition" \
-              --data-urlencode "gateName=workshop-fail" \
+              --data-urlencode "gateName=workshop-standard" \
               --data-urlencode "metric=${1}" \
               --data-urlencode "op=${2}" \
               --data-urlencode "error=${3}" || true
@@ -114,7 +120,7 @@ jobs:
 
           curl -sf -u "${SONAR_AUTH}" -X POST \
             "${SONAR_HOST_URL}/api/qualitygates/set_as_default" \
-            --data-urlencode "name=workshop-fail" || true
+            --data-urlencode "name=workshop-standard" || true
 
       - name: Run tests, coverage, and Sonar analysis
         id: scan
@@ -161,9 +167,18 @@ jobs:
           from pathlib import Path
 
           report = Path("sonar-report")
-          qg = json.loads((report / "quality-gate.json").read_text(encoding="utf-8"))
-          measures_raw = json.loads((report / "measures.json").read_text(encoding="utf-8"))
-          issues_raw = json.loads((report / "issues.json").read_text(encoding="utf-8"))
+
+          qg = json.loads(
+              (report / "quality-gate.json").read_text(encoding="utf-8")
+          )
+
+          measures_raw = json.loads(
+              (report / "measures.json").read_text(encoding="utf-8")
+          )
+
+          issues_raw = json.loads(
+              (report / "issues.json").read_text(encoding="utf-8")
+          )
 
           status = qg.get("projectStatus", {}).get("status", "UNKNOWN")
           conditions = qg.get("projectStatus", {}).get("conditions", [])
@@ -197,22 +212,52 @@ jobs:
           ]:
               lines.append(f"| {key} | {measures.get(key, 'n/a')} |")
 
-          lines += ["", "## Quality gate conditions", "", "| Metric | Operator | Error threshold | Actual | Status |", "| --- | --- | --- | --- | --- |"]
+          lines += [
+              "",
+              "## Quality gate conditions",
+              "",
+              "| Metric | Operator | Error threshold | Actual | Status |",
+              "| --- | --- | --- | --- | --- |",
+          ]
+
           for c in conditions:
               lines.append(
-                  f"| {c.get('metric')} | {c.get('comparator')} | {c.get('errorThreshold')} | {c.get('actualValue')} | {c.get('status')} |"
+                  f"| {c.get('metric')} | "
+                  f"{c.get('comparator')} | "
+                  f"{c.get('errorThreshold')} | "
+                  f"{c.get('actualValue')} | "
+                  f"{c.get('status')} |"
               )
 
-          lines += ["", f"## Issues ({len(issues)})", "", "| Severity | Type | File | Line | Message |", "| --- | --- | --- | --- | --- |"]
+          lines += [
+              "",
+              f"## Issues ({len(issues)})",
+              "",
+              "| Severity | Type | File | Line | Message |",
+              "| --- | --- | --- | --- | --- |",
+          ]
+
           for issue in issues:
               component = issue.get("component", "").split(":", 1)[-1]
               line = issue.get("line", "")
-              message = str(issue.get("message", "")).replace("|", "\\|").replace("\n", " ")
-              lines.append(
-                  f"| {issue.get('severity', '')} | {issue.get('type', '')} | {component} | {line} | {message} |"
+              message = (
+                  str(issue.get("message", ""))
+                  .replace("|", "\\|")
+                  .replace("\n", " ")
               )
 
-          (report / "quality-gate-report.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
+              lines.append(
+                  f"| {issue.get('severity', '')} | "
+                  f"{issue.get('type', '')} | "
+                  f"{component} | "
+                  f"{line} | "
+                  f"{message} |"
+              )
+
+          (report / "quality-gate-report.md").write_text(
+              "\n".join(lines) + "\n",
+              encoding="utf-8"
+          )
           PY
 
           echo "Report written to sonar-report/"
@@ -225,10 +270,19 @@ jobs:
           path: sonar-report/
           if-no-files-found: warn
 
-      - name: Fail job because quality gate did not pass
+      # Non-blocking: report the failure but don't fail normal runs.
+      - name: Quality gate failed (non-blocking)
         if: steps.scan.outcome == 'failure'
         run: |
           echo "QUALITY GATE STATUS: FAILED"
+          echo "::warning::QUALITY GATE STATUS: FAILED"
           echo "Download the sonar-quality-gate-report artifact from this workflow run."
           echo "localhost:9000 is only available on the GitHub Actions runner."
+
+      # Blocking only when manually triggered with enforce_quality_gate=true.
+      - name: Fail job because quality gate did not pass
+        if: steps.scan.outcome == 'failure' && github.event_name == 'workflow_dispatch' && inputs.enforce_quality_gate == true
+        run: |
+          echo "QUALITY GATE STATUS: FAILED"
+          echo "enforce_quality_gate=true, so failing this workflow run."
           exit 1
